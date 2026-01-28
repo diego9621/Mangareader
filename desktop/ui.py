@@ -3,13 +3,14 @@ from PySide6.QtWidgets import QMainWindow, QWidget, QListWidget, QLabel, QHBoxLa
 from PySide6.QtWidgets import QDockWidget, QRadioButton, QButtonGroup, QSlider, QFormLayout, QGroupBox
 from PySide6.QtWidgets import QListWidgetItem
 from PySide6.QtCore import QSize, QRunnable, QThreadPool, QObject, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QCursor
 from app.services.cover_service import cover_path_for_manga_dir, build_cover
 from app.core.reader import list_chapters
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PIL import Image
 from PIL.ImageQt import ImageQt
+from PySide6.QtWidgets import QToolButton
 
 from app.core.config import MANGA_DIR
 from app.core.reader import list_chapters, list_pages
@@ -38,20 +39,31 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Mangareader")
+        self.rows = []
         self.resize(1200, 800)
 
         mode_bar = QWidget()
         mode_layout = QHBoxLayout(mode_bar)
         mode_layout.setContentsMargins(0, 0, 0, 0)
-        self.btn_library = QRadioButton("Library")
-        self.btn_favorites = QRadioButton("Favorites")
-        self.btn_continue = QRadioButton("Continue")
+        self.btn_library = QToolButton()
+        self.btn_library.setText("Library")
+        self.btn_library.setCheckable(True)
         self.btn_library.setChecked(True)
 
-        mode_group = QButtonGroup(self)
-        mode_group.addButton(self.btn_library)
-        mode_group.addButton(self.btn_favorites)
-        mode_group.addButton(self.btn_continue)
+        self.btn_favorites = QToolButton()
+        self.btn_favorites.setText("Favorites")
+        self.btn_favorites.setCheckable(True)
+
+        self.btn_continue = QToolButton()
+        self.btn_continue.setText("Continue")
+        self.btn_continue.setCheckable(True)
+        self.btn_library.setChecked(True)
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.setExclusive(True)
+        self.mode_group.addButton(self.btn_library)
+        self.mode_group.addButton(self.btn_favorites)
+        self.mode_group.addButton(self.btn_continue)
+        self.btn_library.setChecked(True)
 
         mode_layout.addWidget(self.btn_library)
         mode_layout.addWidget(self.btn_favorites)
@@ -130,7 +142,6 @@ class MainWindow(QMainWindow):
 
         dock_body = QWidget()
         dock_layout = QVBoxLayout(dock_body)
-
         fit_box = QGroupBox("Fit")
         fit_layout = QVBoxLayout(fit_box)
         self.fit_width_btn = QRadioButton("Width")
@@ -198,10 +209,25 @@ class MainWindow(QMainWindow):
         self.page_slider.valueChanged.connect(self.on_page_slider_changed)
         self.set_ui_mode("library")
 
-        self.btn_library.toggled.connect(lambda: self.set_library_mode("library"))
-        self.btn_favorites.toggled.connect(lambda: self.set_library_mode("favorites"))
-        self.btn_continue.toggled.connect(lambda: self.set_library_mode("continue"))
-        self.rows = []
+        self.btn_library.toggled.connect(lambda checked: checked and self.set_library_mode("library"))
+        self.btn_favorites.toggled.connect(lambda checked: checked and self.set_library_mode("favorites"))
+        self.btn_continue.toggled.connect(lambda checked: checked and self.set_library_mode("continue"))
+        self.setStyleSheet("""
+        QToolButton {
+            padding: 6px 12px;
+            border-radius: 6px;
+            background: transparent;
+        }
+        QToolButton:checked {
+            background: #d0d0d0;
+            font-weight: 600;
+        }
+        QToolButton:hover {
+            background: #c71f2f;
+            cursor:pointer;
+            font-weight: 600;
+        }
+        """)
 
     def import_library_folder(self):
         start = get_library_root() or str(MANGA_DIR)
