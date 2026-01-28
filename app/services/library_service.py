@@ -5,6 +5,7 @@ from app.core.filesystem import list_dirs
 from app.db.session import get_session
 from app.models.manga import Manga
 from app.services.settings_service import get_library_root
+from datetime import datetime
 
 def sync_library():
     root = get_library_root()
@@ -26,7 +27,24 @@ def sync_library():
 def get_library():
     with get_session() as session:
         return session.exec(select(Manga).order_by(Manga.title)).all()
-    
+
+def toggle_favorite(manga_title: str):
+    with get_session() as session:
+        m = session.exec(select(Manga).where(Manga.title == manga_title)).first()
+        if not m:
+            return
+        m.last_opened = datetime.utcnow()
+        m.open_count += 1
+        session.commit()
+
+def mark_opened(title: str):
+    with get_session() as session:
+        m = session.exec(select(Manga). where(Manga.title == title)).first() 
+        if not m:
+            return
+        m.last_opened = datetime.utcnow()
+        m.open_count = (m.open_count or 0)
+        session.commit() 
         
         
         

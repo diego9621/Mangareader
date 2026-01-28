@@ -16,6 +16,7 @@ from app.core.reader import list_chapters, list_pages
 from app.services.settings_service import set_library_root, get_library_root
 from app.services.library_service import sync_library, get_library
 from app.services.progress_services import load_progress, save_progress
+from app.services.library_service import sync_library, get_library, mark_opened
 
 class CoverSignals(QObject):
     done = Signal(str, str)
@@ -38,6 +39,25 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Mangareader")
         self.resize(1200, 800)
+
+        mode_bar = QWidget()
+        mode_layout = QHBoxLayout(mode_bar)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        self.btn_library = QRadioButton("Library")
+        self.btn_favorites = QRadioButton("Favorites")
+        self.btn_continue = QRadioButton("Continue")
+        self.btn_library.setChecked(True)
+
+        mode_group = QButtonGroup(self)
+        mode_group.addButton(self.btn_library)
+        mode_group.addButton(self.btn_favorites)
+        mode_group.addButton(self.btn_continue)
+
+        mode_layout.addWidget(self.btn_library)
+        mode_layout.addWidget(self.btn_favorites)
+        mode_layout.addWidget(self.btn_continue)
+        mode_layout.addStretch(1)
+
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search titles...")
@@ -65,6 +85,8 @@ class MainWindow(QMainWindow):
         t1 = QLabel("Library")
         t1.setStyleSheet("font-weight:600;")
         left_layout.addWidget(t1)
+        left_layout.insertWidget(1, mode_bar)
+
         left_layout.addWidget(self.search)
         left_layout.addWidget(self.manga_list)
 
@@ -85,6 +107,10 @@ class MainWindow(QMainWindow):
         self.mid_panel = mid
         self.reader_panel = self.scroll
         self.ui_mode = "library"
+        self.library_mode = "library"
+        self.favorites_mode = "favorites"
+        self.continue_mode = "continue"
+
 
         root = QWidget()
         root_layout = QHBoxLayout(root)
@@ -172,6 +198,11 @@ class MainWindow(QMainWindow):
         self.page_slider.valueChanged.connect(self.on_page_slider_changed)
         self.set_ui_mode("library")
 
+        self.btn_library.toggled.connect(lambda: self.set_library_mode("library"))
+        self.btn_favorites.toggled.connect(lambda: self.set_library_mode("favorites"))
+        self.btn_continue.toggled.connect(lambda: self.set_library_mode("continue"))
+        self.rows = []
+
     def import_library_folder(self):
         start = get_library_root() or str(MANGA_DIR)
         path = QFileDialog.getExistingDirectory(self, "Select library folder", start)
@@ -187,6 +218,10 @@ class MainWindow(QMainWindow):
                 it.setIcon(QIcon(cover_path))
                 break
 
+    def set_library_mode(self, mode: str):
+        self.library_mode = mode
+        self.apply_filter()
+
     def set_ui_mode(self, mode: str):
         self.ui_mode = mode
         is_library = mode == "library"
@@ -197,34 +232,47 @@ class MainWindow(QMainWindow):
             self.splitter.setSizes([900, 0, 0])
         else:
             self.splitter.setSizes([260, 260, 900])
+
     def reload_library(self):
         rows = sync_library()
-        rows = rows if rows else get_library()
-        self.manga_by_title = {m.title: Path(m.path) for m in rows} if rows else {}
-        self.all_manga = list(self.manga_by_title.keys())
+        self.rows = rows if rows else get_library()
+        ##self.manga_by_title = {m.title: Path(m.path) for m in rows} if rows else {}
+        ##self.all_manga = list(self.manga_by_title.keys())
         self.apply_filter()
 
     def apply_filter(self):
         q = (self.search.text() or "").strip().lower()
-        titles = self.all_manga if not q else [t for t in self.all_manga if q in t.lower()]
-        placeholder = QIcon()
+        rows = list(self.rows)
+
+        if self.library_mode == "favorites":
+            rows = [m for m in rows if getattr(m, "is_favorite", False)]
+        elif self.library_mode == "continue":
+            rows = [m for m in rows if getattr(m, "last_opened", False)]
+            rows.sort(key=lambda m: m.last_opened, reverse=True)
+        else:
+            rows.sort(key=lambda m: m.title.lower())
+        if q:
+            rows = [m for m in rows if q in m.title.lower()]
+        
+        self.manga_by_title = {m.title: Path(m.path) for m in rows}
         self.manga_list.blockSignals(True)
         self.manga_list.clear()
-
-        for title in titles:
-            manga_dir = self.manga_by_title.get(title)
-            item = QListWidgetItem(title)
+             
+        for m in rows:
+            title = m.title
+            manga_dir = Path(m.path)
+            label = f"* {title}" if getattr(m, "is_favorite", False) else title
+            item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, title)
 
-            if manga_dir:
-                cover = cover_path_for_manga_dir(manga_dir)
-                if cover.exists():
-                    item.setIcon(QIcon(str(cover)))
-                else:
-                    ch = list_chapters(manga_dir)
-                    if ch:
-                        w = CoverWorker(title, manga_dir, ch[0], self.cover_signals)
-                        self.threadpool.start(w)
+            cover = cover_path_for_manga_dir(manga_dir)
+            if cover.exists():
+                item.setIcon(QIcon(str(cover)))
+            else:
+                ch = list_chapters(manga_dir)
+                if ch:
+                    w = CoverWorker(title, manga_dir, ch[0], self.cover_signals)
+                    self.threadpool.start(w)
             self.manga_list.addItem(item)
         self.manga_list.blockSignals(False)
 
@@ -252,6 +300,7 @@ class MainWindow(QMainWindow):
         if not self.current_manga_dir:
             return
         self.set_ui_mode("reading")
+        mark_opened(manga_name)
         self.chapter_list.clear()
         chapters = list_chapters(self.current_manga_dir)
         self.chapter_list.addItems(chapters)
