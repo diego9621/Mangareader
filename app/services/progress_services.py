@@ -20,4 +20,4 @@ def save_progress(chapter_path: str, page_index: int):
         else:
             session.add(Progress(chapter_path=chapter_path, page_index=page_index))
         
-        session.commmit()
+        session.commit()
