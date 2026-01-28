@@ -1,3 +1,4 @@
+from app.services.progress_services import load_progress, save_progress
 from pathlib import Path
 from PySide6.QtWidgets import QMainWindow, QWidget, QListWidget, QLabel, QHBoxLayout, QVBoxLayout, QSplitter, QScrollArea
 from PySide6.QtCore import Qt
@@ -75,7 +76,7 @@ class MainWindow(QMainWindow):
            return
        self.current_chapter_dir = self.current_chapter_dir / chapter_name
        self.pages = list_pages(self.current_chapter_dir)
-       self.page_idx = 0
+       self.page_idx = load_progress(str(self.current_chapter_dir))
        if self.pages:
            self.show_page()
        else:
@@ -103,4 +104,5 @@ class MainWindow(QMainWindow):
         qimg = ImageQt(img)
         pix = QPixmap.fromImage(qimg)
         self.image_label.setPixmap(pix)
+        save_progress(str(p.parent), self.page_idx)
         self.setWindowTitle(f"Mangareader - {p.parent.parent.name} / {p.parent.name} - {self.page_idx+1}/{len(self.pages)}")
