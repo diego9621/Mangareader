@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QListWidget, QLabel, QHBoxLayout, QVBoxLayout, QSplitter, QScrollArea,
     QFileDialog, QLineEdit, QPushButton, QStackedWidget, QDockWidget, QRadioButton, QButtonGroup,
@@ -6,7 +7,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QPalette, QColor, QFont, QIcon, QPixmap
 from PySide6.QtCore import QSize, QRunnable, QThreadPool, QObject, Signal, Qt
-
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QUrl
+from PySide6.QtCore import QSize, QRunnable, QThreadPool, QObject, Signal, Qt, QTimer
+from app.services.anilist_service import trending as anilist_trending, search as anilist_search
+from app.services.cover_dl_service import ensure_cover
 from PIL import Image
 from PIL.ImageQt import ImageQt
 
@@ -17,9 +22,45 @@ from app.services.settings_service import set_library_root, get_library_root
 from app.services.library_service import sync_library, get_library, mark_opened
 from app.services.progress_services import load_progress, save_progress
 
+class CoverDlSignals(QObject):
+    done = Signal(str, str)
+
+class CoverDlWorker(QRunnable):
+    def __init__(self, key: str, url: str, signals: CoverDlSignals):
+        super().__init__()
+        self.key = key
+        self.url = url
+        self.signals = signals
+
+    def run(self):
+        try:
+            p = ensure_cover(self.url)
+            self.signals.done.emit(self.key, str(p) if p else "")
+        except Exception:
+            self.signals.done.emit(self.key, "")
 
 class CoverSignals(QObject):
     done = Signal(str, str)
+
+class DiscoverSignals(QObject):
+    done = Signal(list, str)
+
+class DiscoverWorker(QRunnable):
+    def __init__(self, mode: str, query: str, signals: DiscoverSignals):
+        super().__init__()
+        self.mode = mode
+        self.query = query
+        self.signals = signals
+    
+    def run(self):
+        try:
+            if self.mode == "search":
+                items = anilist_search(self.query, 1, 24)
+            else:
+                items = anilist_trending(1, 24)
+            self.signals.done.emit(items, "")
+        except Exception as e:
+            self.signals.done.emit([], str(e))
 
 
 class CoverWorker(QRunnable):
@@ -134,7 +175,12 @@ class MainWindow(QMainWindow):
         self.mode_group.addButton(self.btn_library)
         self.mode_group.addButton(self.btn_favorites)
         self.mode_group.addButton(self.btn_continue)
+        self.btn_discover = QToolButton()
+        self.btn_discover.setText("Discover")
+        self.btn_discover.setCheckable(True)
+        self.mode_group.addButton(self.btn_discover)
 
+        mode_layout.addWidget(self.btn_discover)
         mode_layout.addWidget(self.btn_library)
         mode_layout.addWidget(self.btn_favorites)
         mode_layout.addWidget(self.btn_continue)
@@ -142,7 +188,7 @@ class MainWindow(QMainWindow):
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search titles...")
-        self.search.textChanged.connect(self.apply_filter)
+        self.search.textChanged.connect(self.on_search_text_changed)
 
         header = QWidget()
         header.setFixedHeight(52)
@@ -162,6 +208,19 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.search)
 
         self.manga_list = QListWidget()
+        self.discover_render_id = 0
+        self.discover_cover_jobs = {}
+        self.discover_list = QListWidget()
+        self.discover_list.setViewMode(QListWidget.IconMode)
+        self.discover_list.setIconSize(QSize(160, 220))
+        self.discover_list.setGridSize(QSize(190, 270))
+        self.discover_list.setResizeMode(QListWidget.Adjust)
+        self.discover_list.setMovement(QListWidget.Static)
+        self.discover_list.setSpacing(10)
+        self.discover_list.setWordWrap(True)
+        self.discover_list.setUniformItemSizes(True)
+        self.discover_list.itemActivated.connect(self.on_discover_open)
+        self.discover_list.currentItemChanged.connect(self.on_discover_selected)
         self.manga_list.setViewMode(QListWidget.IconMode)
         self.manga_list.setMovement(QListWidget.Static)
         self.manga_list.setResizeMode(QListWidget.Adjust)
@@ -188,7 +247,6 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(10, 10, 10, 10)
         left_layout.setSpacing(10)
         left_layout.addWidget(header)
-        left_layout.addWidget(self.manga_list)
 
         self.detail_cover = QLabel()
         self.detail_cover.setFixedSize(240, 330)
@@ -202,13 +260,36 @@ class MainWindow(QMainWindow):
         self.detail_sub = QLabel("")
         self.detail_sub.setWordWrap(True)
         self.detail_sub.setStyleSheet("color:#bdbdbd; font-weight:700;")
+        self.detail_meta = QLabel("")
+        self.detail_meta.setWordWrap(True)
+        self.detail_meta.setStyleSheet("color:#d6d6d6; font-weight:700;")
 
+        self.detail_desc = QLabel("")
+        self.detail_desc.setWordWrap(True)
+        self.detail_desc.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.detail_desc.setStyleSheet("color:#cfcfcf; line-height:1.25;")
+
+        desc_wrap = QWidget()
+        desc_l = QVBoxLayout(desc_wrap)
+        desc_l.setContentsMargins(0, 0, 0, 0)
+        desc_l.addWidget(self.detail_desc)
+
+        self.detail_desc_scroll = QScrollArea()
+        self.detail_desc_scroll.setWidgetResizable(True)
+        self.detail_desc_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.detail_desc_scroll.setWidget(desc_wrap)
+        self.detail_desc_scroll.setMinimumHeight(140)
         self.btn_continue_read = QPushButton("Continue")
         self.btn_open = QPushButton("Open")
+        self.btn_open_link = QPushButton("Open Link")
+
         self.btn_continue_read.setObjectName("PrimaryCTA")
         self.btn_open.setObjectName("SecondaryCTA")
+        self.btn_open_link.setObjectName("SecondaryCTA")
+
         self.btn_continue_read.clicked.connect(self.continue_selected_manga)
         self.btn_open.clicked.connect(self.open_selected_manga)
+        self.btn_open_link.clicked.connect(self.open_selected_link)
 
         btn_row = QWidget()
         btn_row_l = QHBoxLayout(btn_row)
@@ -216,6 +297,7 @@ class MainWindow(QMainWindow):
         btn_row_l.setSpacing(10)
         btn_row_l.addWidget(self.btn_continue_read, 1)
         btn_row_l.addWidget(self.btn_open, 1)
+        btn_row_l.addWidget(self.btn_open_link, 1)
 
         self.chapters_preview = QListWidget()
         self.chapters_preview.setObjectName("ChaptersPreview")
@@ -231,11 +313,12 @@ class MainWindow(QMainWindow):
         detail_layout.addWidget(self.detail_cover, alignment=Qt.AlignmentFlag.AlignTop)
         detail_layout.addWidget(self.detail_title)
         detail_layout.addWidget(self.detail_sub)
+        detail_layout.addWidget(self.detail_meta)
+        detail_layout.addWidget(self.detail_desc_scroll, 1)
         detail_layout.addWidget(btn_row)
         detail_layout.addWidget(QLabel("Chapters"))
         detail_layout.addWidget(self.chapters_preview)
         detail_layout.addStretch(1)
-
         chapters_page = QWidget()
         chapters_layout = QVBoxLayout(chapters_page)
         chapters_layout.setContentsMargins(10, 10, 10, 10)
@@ -262,7 +345,10 @@ class MainWindow(QMainWindow):
         self.reader_panel = self.scroll
         self.ui_mode = "library"
         self.library_mode = "library"
-
+        self.left_stack = QStackedWidget()
+        self.left_stack.addWidget(self.manga_list)
+        self.left_stack.addWidget(self.discover_list)
+        left_layout.addWidget(self.left_stack)
         root = QWidget()
         root_layout = QHBoxLayout(root)
         root_layout.setContentsMargins(0, 0, 0, 0)
@@ -272,6 +358,16 @@ class MainWindow(QMainWindow):
         self.threadpool = QThreadPool.globalInstance()
         self.cover_signals = CoverSignals()
         self.cover_signals.done.connect(self.on_cover_done)
+        self.discover_signals = DiscoverSignals()
+        self.discover_signals.done.connect(self.on_discover_done)
+        self.coverdl_signals = CoverDlSignals()
+        self.coverdl_signals.done.connect(self.on_discover_cover_done)
+        self.discover_cover_jobs = {}
+
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(300)
+        self.search_timer.timeout.connect(self.on_search_debounced)
 
         menu = self.menuBar().addMenu("Library")
         action = menu.addAction("Import Library Folder…")
@@ -322,7 +418,6 @@ class MainWindow(QMainWindow):
         dock_layout.addWidget(self.page_slider)
         dock_layout.addWidget(self.reader_info)
         dock_layout.addStretch(1)
-
         self.reader_dock.setWidget(dock_body)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.reader_dock)
         self.reader_dock.setVisible(False)
@@ -334,6 +429,9 @@ class MainWindow(QMainWindow):
         self.original_pixmap = None
         self.fit_mode = "width"
         self.reading_direction = "LTR"
+        self.discover_items = []
+        self.selected_link = None
+        self.discover_loaded = False
 
         self.manga_by_title: dict[str, Path] = {}
         self.card_by_title: dict[str, MangaCard] = {}
@@ -350,7 +448,7 @@ class MainWindow(QMainWindow):
         self.btn_library.toggled.connect(lambda checked: checked and self.set_library_mode("library"))
         self.btn_favorites.toggled.connect(lambda checked: checked and self.set_library_mode("favorites"))
         self.btn_continue.toggled.connect(lambda checked: checked and self.set_library_mode("continue"))
-
+        self.btn_discover.toggled.connect(lambda checked: checked and self.set_library_mode("discover"))
         self.set_ui_mode("library")
 
     def apply_theme(self):
@@ -367,7 +465,7 @@ class MainWindow(QMainWindow):
             pal.setColor(QPalette.WindowText, QColor("#eaeaea"))
             pal.setColor(QPalette.Button, QColor("#1c1c1c"))
             pal.setColor(QPalette.ButtonText, QColor("#eaeaea"))
-            pal.setColor(QPalette.Highlight, QColor("#3b82f6"))
+            pal.setColor(QPalette.Highlight, QColor("#ef5050"))
             pal.setColor(QPalette.HighlightedText, QColor("#ffffff"))
             app.setPalette(pal)
 
@@ -381,7 +479,7 @@ class MainWindow(QMainWindow):
             QListWidget::item { border-radius: 12px; padding: 6px; }
             QListWidget::item:selected { background: rgba(59,130,246,0.18); border: 1px solid rgba(59,130,246,0.35); }
             QLineEdit { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 9px 12px; }
-            QLineEdit:focus { border: 1px solid rgba(59,130,246,0.7); }
+            QLineEdit:focus { border: 1px solid rgba(230, 73, 73, 0.7); }
             QPushButton { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10); border-radius: 12px; padding: 10px 12px; font-weight: 800; }
             QPushButton:hover { background: rgba(255,255,255,0.10); }
             QPushButton:pressed { background: rgba(255,255,255,0.05); }
@@ -393,8 +491,8 @@ class MainWindow(QMainWindow):
             #PrimaryCTA:hover { background: rgba(59,130,246,0.85); }
             #SecondaryCTA { background: rgba(255,255,255,0.06); }
 
-            #CardPrimary { background: rgba(59,130,246,0.95); border: 1px solid rgba(59,130,246,0.95); color: white; border-radius: 12px; padding: 9px 10px; font-weight: 900; }
-            #CardPrimary:hover { background: rgba(59,130,246,0.85); }
+            #CardPrimary { background: rgba(227, 101, 109, 0.95); border: 1px solid rgba(59,130,246,0.95); color: white; border-radius: 12px; padding: 9px 10px; font-weight: 900; }
+            #CardPrimary:hover { background: rgba(232, 86, 86, 0.85); }
             #CardSecondary { background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; padding: 9px 10px; font-weight: 900; }
 
             QGroupBox { border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; margin-top: 10px; padding: 10px; }
@@ -431,6 +529,72 @@ class MainWindow(QMainWindow):
         set_library_root(path)
         self.reload_library()
 
+    def on_search_text_changed(self, _):
+        if self.library_mode == "discover":
+            self.search_timer.start()
+        else:
+            self.apply_filter()
+
+
+    def on_search_debounced(self):
+        if self.library_mode != "discover":
+            return
+        q = (self.search.text() or "").strip()
+        self.load_discover(q)
+
+    def load_discover(self, q: str):
+        mode = "search" if q else "trending"
+        self.discover_list.clear()
+        self.discover_list.addItem(QListWidgetItem("Loading…"))
+        self.threadpool.start(DiscoverWorker(mode, q, self.discover_signals))
+
+    def on_discover_cover_done(self, key: str, path: str):
+        if not path:
+            return
+
+        if key.startswith("detail:"):
+            try:
+                rid = int(key.split(":", 1)[1])
+            except:
+                return
+            if rid != self.discover_render_id:
+                return
+            pix = self._pixmap_cover(path, self.detail_cover.size())
+            if not pix.isNull():
+                self.detail_cover.setPixmap(pix)
+            return
+
+        if ":" not in key:
+            return
+
+        rid_s, _ = key.split(":", 1)
+        try:
+            rid = int(rid_s)
+        except:
+            return
+        if rid != self.discover_render_id:
+            return
+
+        it = self.discover_cover_jobs.get(key)
+        if not it:
+            return
+
+        card = self.discover_list.itemWidget(it)
+        if not card:
+            return
+
+        pix = self._pixmap_cover(path, QSize(160, 220))
+        if not pix.isNull():
+            card.set_cover_pixmap(pix)
+
+
+    def on_discover_done(self, items: list, err: str):
+        if err:
+            self.discover_list.clear()
+            self.discover_list.addItem(QListWidgetItem(f"Error: {err}"))
+            return
+        self.discover_items = items
+        self.render_discover()
     def on_cover_done(self, title: str, cover_path: str):
         card = self.card_by_title.get(title)
         if not card:
@@ -444,8 +608,39 @@ class MainWindow(QMainWindow):
 
     def set_library_mode(self, mode: str):
         self.library_mode = mode
+        if mode == "discover":
+            self.left_stack.setCurrentIndex(1)
+            q = (self.search.text() or "").strip()
+            self.load_discover(q)
+            self.discover_loaded = True
+            return
+        self.left_stack.setCurrentIndex(0)
         self.apply_filter()
 
+    def _clean_desc(self, s: str) -> str:
+        if not s:
+            return ""
+        s = re.sub(r"<br\s*/?>", "\n", s, flags=re.I)
+        s = re.sub(r"</p\s*>", "\n\n", s, flags=re.I)
+        s = re.sub(r"<[^>]+>", "", s)
+        s = s.replace("&mdash;", "—").replace("&quot;", "\"").replace("&amp;", "&")
+        s = re.sub(r"\n{3,}", "\n\n", s).strip()
+        return s
+   
+    def _fmt_date(self, d: dict) -> str:
+        if not d:
+            return ""
+        y = d.get("year")
+        m = d.get("month")
+        day = d.get("day")
+        if not y:
+            return ""
+        if m and day:
+            return f"{y:04d}-{m:02d}-{day:02d}"
+        if m:
+            return f"{y:04d}-{m:02d}"
+        return f"{y:04d}"
+    
     def set_ui_mode(self, mode: str):
         self.ui_mode = mode
         is_library = mode == "library"
@@ -471,9 +666,10 @@ class MainWindow(QMainWindow):
         self.apply_filter()
 
     def apply_filter(self):
+        if self.library_mode == "discover":
+            return
         q = (self.search.text() or "").strip().lower()
         rows = list(self.rows)
-
         if self.library_mode == "favorites":
             rows = [m for m in rows if getattr(m, "is_favorite", False)]
         elif self.library_mode == "continue":
@@ -481,52 +677,34 @@ class MainWindow(QMainWindow):
             rows.sort(key=lambda m: m.last_opened, reverse=True)
         else:
             rows.sort(key=lambda m: m.title.lower())
-
         if q:
             rows = [m for m in rows if q in m.title.lower()]
-
         self.manga_by_title = {m.title: Path(m.path) for m in rows}
-
         self.manga_list.blockSignals(True)
         self.manga_list.clear()
-        self.card_by_title.clear()
-
         for m in rows:
             title = m.title
             manga_dir = Path(m.path)
-
-            it = QListWidgetItem()
-            it.setData(Qt.ItemDataRole.UserRole, title)
-            it.setSizeHint(QSize(180, 280))
-            self.manga_list.addItem(it)
-
-            card = MangaCard(title)
-            self.card_by_title[title] = card
-
-            def select_this(item=it):
-                self.manga_list.setCurrentItem(item)
-
-            def open_this(t=title):
-                self.open_manga(t)
-
-            def continue_this(t=title):
-                self.continue_manga(t)
-
-            card.clicked.connect(select_this)
-            card.openRequested.connect(open_this)
-            card.continueRequested.connect(continue_this)
-
+            label = f"* {title}" if getattr(m, "is_favorite", False) else title
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, title)
             cover = cover_path_for_manga_dir(manga_dir)
             if cover.exists():
-                pix = QPixmap(str(cover))
-                if not pix.isNull():
-                    card.set_cover_pixmap(pix)
+                item.setIcon(QIcon(str(cover)))
             else:
                 ch = list_chapters(manga_dir)
                 if ch:
-                    self.threadpool.start(CoverWorker(title, manga_dir, ch[0], self.cover_signals))
-
-            self.manga_list.setItemWidget(it, card)
+                    w = CoverWorker(title, manga_dir, ch[0], self.cover_signals)
+                    self.threadpool.start(w)
+            self.manga_list.addItem(item)
+        self.manga_list.blockSignals(False)
+        if self.manga_list.count():
+            self.manga_list.setCurrentRow(0)
+        else:
+            self.detail_title.setText("No results")
+            self.detail_cover.clear()
+            self.detail_sub.setText("")
+            self.chapters_preview.clear()
 
         self.manga_list.blockSignals(False)
 
@@ -537,6 +715,129 @@ class MainWindow(QMainWindow):
             self.detail_cover.clear()
             self.detail_sub.setText("")
             self.chapters_preview.clear()
+
+    def _discover_title(self, m: dict) -> str:
+        t = m.get("title") or {}
+        return t.get("english") or t.get("romaji") or t.get("native") or "Untitled"
+
+    def load_discover_trending(self):
+        self.discover_items = anilist_trending(1, 24)
+        self.render_discover()
+
+    def load_discover_search(self, q: str):
+        self.discover_items = anilist_search(q, 1, 24)
+        self.render_discover()
+
+    def render_discover(self):
+        self.discover_render_id += 1
+        rid = self.discover_render_id
+
+        self.discover_list.blockSignals(True)
+        self.discover_list.clear()
+        self.discover_cover_jobs = {}
+
+        for i, m in enumerate(self.discover_items):
+            title = self._discover_title(m)
+            it = QListWidgetItem()
+            it.setData(Qt.ItemDataRole.UserRole, m)
+            it.setSizeHint(QSize(190, 270))
+
+            card = MangaCard(title)
+            self.discover_list.addItem(it)
+            self.discover_list.setItemWidget(it, card)
+
+            url = (m.get("coverImage") or {}).get("large")
+            if url:
+                key = f"{rid}:{i}"
+                self.discover_cover_jobs[key] = it
+                self.threadpool.start(CoverDlWorker(key, url, self.coverdl_signals))
+
+        self.discover_list.blockSignals(False)
+        if self.discover_list.count():
+            self.discover_list.setCurrentRow(0)
+
+    def _pixmap_cover(self, path: str, size: QSize) -> QPixmap:
+        pix = QPixmap(path)
+        if pix.isNull():
+            return QPixmap()
+        pix.setDevicePixelRatio(1.0)
+        pix = pix.scaled(size, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+        x = max(0, (pix.width() - size.width()) // 2)
+        y = max(0, (pix.height() - size.height()) // 2)
+        pix = pix.copy(x, y, size.width(), size.height())
+        pix.setDevicePixelRatio(1.0)
+        return pix
+
+    def on_discover_selected(self, current, previous):
+        if not current:
+            return
+        m = current.data(Qt.ItemDataRole.UserRole)
+        if not m:
+            return
+
+        title = self._discover_title(m)
+        self.detail_title.setText(title)
+        self.selected_link = m.get("siteUrl")
+        self.chapters_preview.clear()
+        self.detail_cover.clear()
+
+        url = (m.get("coverImage") or {}).get("large")
+        if url:
+            self.threadpool.start(CoverDlWorker(f"detail:{self.discover_render_id}", url, self.coverdl_signals))
+
+        score = m.get("averageScore")
+        mean = m.get("meanScore")
+        pop = m.get("popularity")
+        fav = m.get("favourites")
+        status = m.get("status") or ""
+        fmt = m.get("format") or ""
+        chapters = m.get("chapters")
+        volumes = m.get("volumes")
+        start = self._fmt_date(m.get("startDate") or {})
+        end = self._fmt_date(m.get("endDate") or {})
+        season = m.get("season") or ""
+        season_year = m.get("seasonYear")
+        genres = m.get("genres") or []
+
+        top_bits = [b for b in (fmt, status, (f"{score}/100" if score else "")) if b]
+        self.detail_sub.setText(" • ".join(top_bits))
+
+        meta = []
+        if mean:
+            meta.append(f"Mean: {mean}/100")
+        if pop:
+            meta.append(f"Popularity: {pop}")
+        if fav:
+            meta.append(f"Favourites: {fav}")
+        if chapters:
+            meta.append(f"Chapters: {chapters}")
+        if volumes:
+            meta.append(f"Volumes: {volumes}")
+        if season or season_year:
+            s = " ".join([x for x in [season.title() if season else "", str(season_year) if season_year else ""] if x])
+            if s:
+                meta.append(s)
+        if start or end:
+            meta.append(f"Dates: {start or '?'} → {end or '?'}")
+        if genres:
+            meta.append("Genres: " + ", ".join(genres[:6]))
+
+        self.detail_meta.setText(" • ".join(meta))
+
+        desc = self._clean_desc(m.get("description") or "")
+        self.detail_desc.setText(desc if desc else "No summary available.")
+
+    def on_discover_open(self, item: QListWidgetItem):
+        m = item.data(Qt.ItemDataRole.UserRole)
+        if not m:
+            return
+        url = m.get("siteUrl")
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def open_selected_link(self):
+        if self.selected_link:
+            QDesktopServices.openUrl(QUrl(self.selected_link))
 
     def on_manga_highlighted(self, current, previous):
         if not current:
@@ -603,6 +904,9 @@ class MainWindow(QMainWindow):
         self.open_manga(title, chapter=ch)
 
     def open_selected_manga(self):
+        if self.library_mode == "discover":
+            self.open_selected_link()
+            return
         item = self.manga_list.currentItem()
         if not item:
             return
