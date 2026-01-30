@@ -1,20 +1,20 @@
 from pathlib import Path
 import re
+
+from PySide6.QtCore import Qt, QSize, QRect, QPoint, QUrl, QTimer, QRunnable, QThreadPool, QObject, Signal
+from PySide6.QtGui import QPalette, QColor, QFont, QIcon, QPixmap, QDesktopServices
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QListWidget, QLabel, QHBoxLayout, QVBoxLayout, QSplitter, QScrollArea,
-    QFileDialog, QLineEdit, QPushButton, QStackedWidget, QDockWidget, QRadioButton, QButtonGroup,
-    QSlider, QGroupBox, QListWidgetItem, QToolButton, QApplication, QFrame, QProgressBar
+    QApplication, QMainWindow, QWidget, QListWidget, QListWidgetItem, QLabel,
+    QHBoxLayout, QVBoxLayout, QSplitter, QScrollArea, QFileDialog, QLineEdit,
+    QPushButton, QStackedWidget, QDockWidget, QRadioButton, QButtonGroup, QSlider,
+    QGroupBox, QToolButton, QFrame, QProgressBar, QLayout
 )
-from PySide6.QtGui import QPalette, QColor, QFont, QIcon, QPixmap
-from PySide6.QtCore import QSize, QRunnable, QThreadPool, QObject, Signal, Qt
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtCore import QUrl
-from PySide6.QtCore import QSize, QRunnable, QThreadPool, QObject, Signal, Qt, QTimer
-from app.services.anilist_service import trending as anilist_trending, search as anilist_search
-from app.services.cover_dl_service import ensure_cover
+
 from PIL import Image
 from PIL.ImageQt import ImageQt
 
+from app.services.anilist_service import trending as anilist_trending, search as anilist_search
+from app.services.cover_dl_service import ensure_cover
 from app.core.config import MANGA_DIR
 from app.core.reader import list_chapters, list_pages
 from app.services.cover_service import cover_path_for_manga_dir, build_cover
@@ -22,6 +22,76 @@ from app.services.settings_service import set_library_root, get_library_root
 from app.services.library_service import sync_library, get_library, mark_opened
 from app.services.progress_services import load_progress, save_progress
 
+class FlowLayout(QLayout):
+    def __init__(self, parent=None, margin=0, spacing=8):
+        super().__init__(parent)
+        self._items = []
+        self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientations(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        s = QSize()
+        for it in self._items:
+            s = s.expandedTo(it.minimumSize())
+        l, t, r, b = self.getContentsMargins()
+        s += QSize(l + r, t + b)
+        return s
+
+    def _do_layout(self, rect, test_only):
+        x = rect.x()
+        y = rect.y()
+        line_h = 0
+        sp = self.spacing()
+        l, t, r, b = self.getContentsMargins()
+        effective = rect.adjusted(l, t, -r, -b)
+
+        x = effective.x()
+        y = effective.y()
+        right = effective.right()
+
+        for it in self._items:
+            hint = it.sizeHint()
+            next_x = x + hint.width() + sp
+            if next_x - sp > right and line_h > 0:
+                x = effective.x()
+                y = y + line_h + sp
+                next_x = x + hint.width() + sp
+                line_h = 0
+            if not test_only:
+                it.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_h = max(line_h, hint.height())
+
+        return (y + line_h - rect.y()) + t + b
+    
 class CoverDlSignals(QObject):
     done = Signal(str, str)
 
@@ -263,7 +333,12 @@ class MainWindow(QMainWindow):
         self.detail_meta = QLabel("")
         self.detail_meta.setWordWrap(True)
         self.detail_meta.setStyleSheet("color:#d6d6d6; font-weight:700;")
-
+        self.detail_meta_top = QLabel("")
+        self.detail_meta_top.setWordWrap(True)
+        self.detail_meta_top.setStyleSheet("color:#d6d6d6; font-weight:800;")
+        self.genre_box = QWidget()
+        self.genre_flow = FlowLayout(self.genre_box, margin=0, spacing=8)
+        self.genre_box.setLayout(self.genre_flow)
         self.detail_desc = QLabel("")
         self.detail_desc.setWordWrap(True)
         self.detail_desc.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -314,6 +389,7 @@ class MainWindow(QMainWindow):
         detail_layout.addWidget(self.detail_title)
         detail_layout.addWidget(self.detail_sub)
         detail_layout.addWidget(self.detail_meta)
+        detail_layout.addWidget(self.genre_box)
         detail_layout.addWidget(self.detail_desc_scroll, 1)
         detail_layout.addWidget(btn_row)
         detail_layout.addWidget(QLabel("Chapters"))
@@ -519,6 +595,15 @@ class MainWindow(QMainWindow):
                 color: #d6d6d6;
                 font-weight: 900;
             }
+            #Chip {
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.10);
+                border-radius: 999px;
+                padding: 4px 10px;
+                font-weight: 900;
+                color: #d6d6d6;
+            }
+                           
         """)
 
     def import_library_folder(self):
@@ -535,6 +620,22 @@ class MainWindow(QMainWindow):
         else:
             self.apply_filter()
 
+    def _clear_layout(self, layout):
+        while layout.count():
+            it = layout.takeAt(0)
+            w = it.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+
+    def set_genre_chips(self, genres):
+        self._clear_layout(self.genre_flow)
+        for g in (genres or [])[:10]:
+            lab = QLabel(g)
+            lab.setObjectName("Chip")
+            lab.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+            self.genre_flow.addWidget(lab)
+        self.genre_box.setVisible(bool(genres))
 
     def on_search_debounced(self):
         if self.library_mode != "discover":
@@ -775,58 +876,62 @@ class MainWindow(QMainWindow):
         if not m:
             return
 
-        title = self._discover_title(m)
-        self.detail_title.setText(title)
+        rid = self.discover_render_id
+        self.detail_title.setText(self._discover_title(m))
         self.selected_link = m.get("siteUrl")
-        self.chapters_preview.clear()
+
         self.detail_cover.clear()
+        self.chapters_preview.clear()
+        self.detail_sub.setText("")
+        self.detail_meta.setText("")
+        self.detail_desc.setText("")
+        self.set_genre_chips([])
 
         url = (m.get("coverImage") or {}).get("large")
         if url:
-            self.threadpool.start(CoverDlWorker(f"detail:{self.discover_render_id}", url, self.coverdl_signals))
+            self.threadpool.start(CoverDlWorker(f"detail:{rid}", url, self.coverdl_signals))
 
         score = m.get("averageScore")
-        mean = m.get("meanScore")
+        status = (m.get("status") or "").replace("_", " ").title()
+        fmt = (m.get("format") or "").replace("_", " ").title()
+        score_txt = f"{score}%" if score is not None else ""
+        self.detail_sub.setText(" • ".join(x for x in [fmt, status, score_txt] if x))
+
+        meta_lines = []
         pop = m.get("popularity")
+        if pop is not None:
+            meta_lines.append(f"Popularity: {pop:,}")
+
         fav = m.get("favourites")
-        status = m.get("status") or ""
-        fmt = m.get("format") or ""
+        if fav is not None:
+            meta_lines.append(f"Favourites: {fav:,}")
+
         chapters = m.get("chapters")
         volumes = m.get("volumes")
+        if chapters:
+            meta_lines.append(f"Chapters: {chapters}")
+        if volumes:
+            meta_lines.append(f"Volumes: {volumes}")
+
         start = self._fmt_date(m.get("startDate") or {})
         end = self._fmt_date(m.get("endDate") or {})
-        season = m.get("season") or ""
-        season_year = m.get("seasonYear")
-        genres = m.get("genres") or []
-
-        top_bits = [b for b in (fmt, status, (f"{score}/100" if score else "")) if b]
-        self.detail_sub.setText(" • ".join(top_bits))
-
-        meta = []
-        if mean:
-            meta.append(f"Mean: {mean}/100")
-        if pop:
-            meta.append(f"Popularity: {pop}")
-        if fav:
-            meta.append(f"Favourites: {fav}")
-        if chapters:
-            meta.append(f"Chapters: {chapters}")
-        if volumes:
-            meta.append(f"Volumes: {volumes}")
-        if season or season_year:
-            s = " ".join([x for x in [season.title() if season else "", str(season_year) if season_year else ""] if x])
-            if s:
-                meta.append(s)
         if start or end:
-            meta.append(f"Dates: {start or '?'} → {end or '?'}")
-        if genres:
-            meta.append("Genres: " + ", ".join(genres[:6]))
+            meta_lines.append(f"Dates: {start or '?'} → {end or '?'}")
 
-        self.detail_meta.setText(" • ".join(meta))
+        season = (m.get("season") or "").replace("_", " ").title()
+        season_year = m.get("seasonYear")
+        if season or season_year:
+            s = " ".join(x for x in [season, str(season_year) if season_year else ""] if x)
+            if s:
+                meta_lines.append(s)
+
+        self.detail_meta.setText("\n".join(meta_lines))
+
+        self.set_genre_chips(m.get("genres") or [])
 
         desc = self._clean_desc(m.get("description") or "")
         self.detail_desc.setText(desc if desc else "No summary available.")
-
+   
     def on_discover_open(self, item: QListWidgetItem):
         m = item.data(Qt.ItemDataRole.UserRole)
         if not m:

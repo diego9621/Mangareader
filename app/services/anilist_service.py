@@ -5,6 +5,7 @@ API = "https://graphql.anilist.co"
 MEDIA_FIELDS = """
 id
 siteUrl
+isAdult
 title { romaji english native }
 description(asHtml: true)
 averageScore
@@ -21,6 +22,7 @@ startDate { year month day }
 endDate { year month day }
 genres
 coverImage { large }
+tags { name isAdult }
 """
 
 def _post(query: str, variables: dict) -> dict:
@@ -35,7 +37,12 @@ def trending(page: int = 1, per_page: int = 24) -> list[dict]:
     q = f"""
     query ($page:Int,$perPage:Int) {{
       Page(page:$page, perPage:$perPage) {{
-        media(type:MANGA, sort:TRENDING_DESC) {{
+        media(
+          type:MANGA,
+          sort:TRENDING_DESC,
+          isAdult:false,
+          genre_not_in:["Hentai"]
+        ) {{
           {MEDIA_FIELDS}
         }}
       }}
@@ -48,7 +55,13 @@ def search(query: str, page: int = 1, per_page: int = 24) -> list[dict]:
     q = f"""
     query ($search:String,$page:Int,$perPage:Int) {{
       Page(page:$page, perPage:$perPage) {{
-        media(type:MANGA, search:$search, sort:SEARCH_MATCH) {{
+        media(
+          type:MANGA,
+          search:$search,
+          sort:SEARCH_MATCH,
+          isAdult:false,
+          genre_not_in:["Hentai"]
+        ) {{
           {MEDIA_FIELDS}
         }}
       }}
