@@ -1,25 +1,15 @@
 from __future__ import annotations
 import re
-from PySide6.QtCore import Qt, QSize, QUrl, QThreadPool
+from PySide6.QtCore import Qt, QSize, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QListWidget, QListWidgetItem
-
+from PySide6.QtWidgets import QListWidgetItem, QMenu
 from desktop.widgets.manga_card import MangaCard
-from desktop.workers.cover_dl_worker import CoverDlWorker, CoverDlSignals
-from desktop.workers.discover_worker import DiscoverWorker, DiscoverSignals
+from desktop.workers.discover_worker import DiscoverWorker
+from desktop.workers.cover_dl_worker import CoverDlWorker
 from desktop.utils import pixmap_cover_crop
 
-
 class DiscoverController:
-    def __init__(
-        self,
-        threadpool: QThreadPool,
-        discover_list: QListWidget,
-        coverdl_signals: CoverDlSignals,
-        discover_signals: DiscoverSignals,
-        detail_page,
-        open_link_callback,
-    ):
+    def __init__(self, threadpool, discover_list, coverdl_signals, discover_signals, detail_page, open_link_callback):
         self.threadpool = threadpool
         self.discover_list = discover_list
         self.coverdl_signals = coverdl_signals
@@ -27,13 +17,17 @@ class DiscoverController:
         self.detail_page = detail_page
         self.open_link_callback = open_link_callback
 
-        self.discover_signals.done.connect(self.on_discover_done)
-        self.coverdl_signals.done.connect(self.on_cover_done)
+        self.items_all: list[dict] = []
+        self.items_view: list[dict] = []
 
-        self.items = []
+        self.selected_link: str | None = None
+
+        self.selected_genres: set[str] = set()
         self.render_id = 0
         self.cover_jobs: dict[str, QListWidgetItem] = {}
-        self.selected_link = None
+
+        self.discover_signals.done.connect(self.on_done)
+        self.coverdl_signals.done.connect(self.on_cover_done)
 
     def load(self, q: str):
         q = (q or "").strip()
@@ -42,12 +36,67 @@ class DiscoverController:
         self.discover_list.addItem(QListWidgetItem("Loading…"))
         self.threadpool.start(DiscoverWorker(mode, q, self.discover_signals))
 
-    def on_discover_done(self, items: list, err: str):
+    def on_done(self, items: list, err: str):
         if err:
+            self.items_all = []
+            self.items_view = []
             self.discover_list.clear()
             self.discover_list.addItem(QListWidgetItem(f"Error: {err}"))
             return
-        self.items = items
+        self.items_all = list(items or [])
+        self.apply_filters_and_render()
+
+    def available_genres(self) -> list[str]:
+        s: set[str] = set()
+        for m in self.items_all:
+            for g in (m.get("genres") or []):
+                if isinstance(g, str):
+                    g = g.strip()
+                    if g:
+                        s.add(g)
+        return sorted(s)
+
+    def populate_genre_menu(self, menu: QMenu):
+        menu.clear()
+        genres = self.available_genres()
+        if not genres:
+            a = menu.addAction("No genres")
+            a.setEnabled(False)
+            return
+
+        a_clear = menu.addAction("Clear")
+        a_clear.triggered.connect(lambda: self.set_genres(set()))
+        menu.addSeparator()
+
+        selected = set(self.selected_genres)
+        for g in genres:
+            a = menu.addAction(g)
+            a.setCheckable(True)
+            a.setChecked(g in selected)
+            a.toggled.connect(lambda on, gg=g: self.toggle_genre(gg, on))
+
+    def set_genres(self, genres: set[str]):
+        self.selected_genres = set(genres or set())
+        self.apply_filters_and_render()
+
+    def toggle_genre(self, genre: str, enabled: bool):
+        if enabled:
+            self.selected_genres.add(genre)
+        else:
+            self.selected_genres.discard(genre)
+        self.apply_filters_and_render()
+
+    def apply_filters_and_render(self):
+        if not self.selected_genres:
+            self.items_view = list(self.items_all)
+        else:
+            want = set(self.selected_genres)
+            out = []
+            for m in self.items_all:
+                gs = set(m.get("genres") or [])
+                if gs & want:
+                    out.append(m)
+            self.items_view = out
         self.render()
 
     def render(self):
@@ -58,11 +107,20 @@ class DiscoverController:
         self.discover_list.clear()
         self.cover_jobs = {}
 
-        for i, m in enumerate(self.items):
+        items = self.items_view
+        if not items:
+            it = QListWidgetItem("No results (genre filter too strict?)")
+            self.discover_list.addItem(it)
+            self.discover_list.blockSignals(False)
+            return
+
+        for i, m in enumerate(items):
+            title = self._discover_title(m)
             it = QListWidgetItem()
             it.setData(Qt.UserRole, m)
             it.setSizeHint(QSize(190, 270))
-            card = MangaCard(self._title(m))
+
+            card = MangaCard(title)
             self.discover_list.addItem(it)
             self.discover_list.setItemWidget(it, card)
 
@@ -94,9 +152,10 @@ class DiscoverController:
 
         if ":" not in key:
             return
-        rid_s, _ = key.split(":", 1)
+        rid_s, idx_s = key.split(":", 1)
         try:
             rid = int(rid_s)
+            _ = int(idx_s)
         except:
             return
         if rid != self.render_id:
@@ -108,21 +167,20 @@ class DiscoverController:
         card = self.discover_list.itemWidget(it)
         if not card:
             return
-
         pix = pixmap_cover_crop(path, QSize(160, 220))
         if not pix.isNull():
             card.set_cover_pixmap(pix)
 
-    def on_selected(self, current):
+    def on_selected(self, current: QListWidgetItem | None):
         if not current:
             return
         m = current.data(Qt.UserRole)
-        if not m:
+        if not m or not isinstance(m, dict):
             return
 
         rid = self.render_id
+        self.detail_page.detail_title.setText(self._discover_title(m))
         self.selected_link = m.get("siteUrl")
-        self.detail_page.detail_title.setText(self._title(m))
 
         self.detail_page.detail_cover.clear()
         self.detail_page.chapters_preview.clear()
@@ -141,53 +199,57 @@ class DiscoverController:
         score_txt = f"{score}%" if score is not None else ""
         self.detail_page.detail_sub.setText(" • ".join(x for x in (fmt, status, score_txt) if x))
 
-        meta = []
+        meta_lines = []
         mean = m.get("meanScore")
         if mean is not None:
-            meta.append(f"Rating: {mean}%")
+            meta_lines.append(f"Rating: {mean}%")
+
         pop = m.get("popularity")
         if pop is not None:
-            meta.append(f"Popularity: {pop:,}")
+            meta_lines.append(f"Popularity: {pop:,}")
+
         fav = m.get("favourites")
         if fav is not None:
-            meta.append(f"Favourites: {fav:,}")
+            meta_lines.append(f"Favourites: {fav:,}")
+
         chapters = m.get("chapters")
         volumes = m.get("volumes")
         if chapters:
-            meta.append(f"Chapters: {chapters}")
+            meta_lines.append(f"Chapters: {chapters}")
         if volumes:
-            meta.append(f"Volumes: {volumes}")
+            meta_lines.append(f"Volumes: {volumes}")
 
         start = self._fmt_date(m.get("startDate") or {})
         end = self._fmt_date(m.get("endDate") or {})
         if start or end:
-            meta.append(f"Dates: {start or '?'} → {end or '?'}")
+            meta_lines.append(f"Dates: {start or '?'} → {end or '?'}")
 
         season = (m.get("season") or "").replace("_", " ").title()
         season_year = m.get("seasonYear")
         if season or season_year:
             s = " ".join(x for x in (season, str(season_year) if season_year else "") if x)
             if s:
-                meta.append(s)
+                meta_lines.append(s)
 
-        self.detail_page.detail_meta.setText("\n".join(meta))
+        self.detail_page.detail_meta.setText("\n".join(meta_lines))
         self.detail_page.set_genres(m.get("genres") or [])
+
         desc = self._clean_desc(m.get("description") or "")
         self.detail_page.detail_desc.setText(desc if desc else "No summary available.")
 
     def open_selected(self, item: QListWidgetItem):
         m = item.data(Qt.UserRole)
-        if not m:
+        if not m or not isinstance(m, dict):
             return
         url = m.get("siteUrl")
         if url:
-            QDesktopServices.openUrl(QUrl(url))
+            self.open_link_callback(url)
 
     def open_link(self):
         if self.selected_link:
             self.open_link_callback(self.selected_link)
 
-    def _title(self, m: dict) -> str:
+    def _discover_title(self, m: dict) -> str:
         t = m.get("title") or {}
         return t.get("english") or t.get("romaji") or t.get("native") or "Untitled"
 

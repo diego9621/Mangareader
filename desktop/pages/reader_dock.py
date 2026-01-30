@@ -12,7 +12,7 @@ class ReaderDock(QWidget):
         fit_box = QGroupBox("Fit")
         fit_l = QVBoxLayout(fit_box)
         self.fit_width_btn = QRadioButton("Width")
-        self.fit_height_btn = QRadioButton("Heigth")
+        self.fit_height_btn = QRadioButton("Height")
         self.fit_width_btn.setChecked(True)
         fit_l.addWidget(self.fit_width_btn)
         fit_l.addWidget(self.fit_height_btn)
@@ -60,3 +60,32 @@ class ReaderDock(QWidget):
 
     def _emit_dir(self):
         self.directionChanged.emit("RTL" if self.dir_rtl_btn.isChecked() else "LTR")
+
+    def set_page_range(self, total_pages: int):
+        total = max(1, int(total_pages or 1))
+        self.page_slider.blockSignals(True)
+        self.page_slider.setMinimum(1)
+        self.page_slider.setMaximum(total)
+        self.page_slider.setValue(1)
+        self.page_slider.blockSignals(False)
+
+    def set_page(self, page_idx: int):
+        v = int(page_idx) + 1
+        self.page_slider.blockSignals(True)
+        self.page_slider.setValue(max(self.page_slider.minimum(), min(self.page_slider.maximum(), v)))
+        self.page_slider.blockSignals(False)
+
+    def set_info(self, text: str):
+        self.reader_info.setText(text or "")
+
+    def set_fit(self, fit: str):
+        if fit == "height":
+            self.fit_height_btn.setChecked(True)
+        else:
+            self.fit_width_btn.setChecked(True)
+
+    def set_direction(self, direction: str):
+        if direction == "RTL":
+            self.dir_rtl_btn.setChecked(True)
+        else:
+            self.dir_ltr_btn.setChecked(True)

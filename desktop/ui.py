@@ -1,28 +1,32 @@
 from __future__ import annotations
-from pathlib import Path
 from PySide6.QtCore import Qt, QSize, QUrl, QTimer, QThreadPool
 from PySide6.QtGui import QIcon, QPixmap, QDesktopServices
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QListWidget, QListWidgetItem, QLabel, QHBoxLayout, QVBoxLayout,
     QSplitter, QScrollArea, QFileDialog, QLineEdit, QStackedWidget, QDockWidget,
-    QRadioButton, QButtonGroup, QSlider, QGroupBox, QToolButton
+    QButtonGroup, QToolButton, QMenu
 )
+
 from app.core.config import MANGA_DIR
 from app.core.reader import list_chapters
 from app.services.settings_service import set_library_root, get_library_root
 from app.services.library_service import mark_opened
-from app.services.cover_service import cover_path_for_manga_dir
 from desktop.theme.palette import apply_palette
 from desktop.theme.stylesheet import apply_stylesheet
 from desktop.pages.detail_page import DetailPage
 from desktop.pages.chapters_page import ChaptersPage
+
 from desktop.workers.cover_dl_worker import CoverDlSignals
 from desktop.workers.discover_worker import DiscoverSignals
 from desktop.workers import CoverSignals
+
 from desktop.controllers.detail_controller import DetailController
 from desktop.controllers.library_controller import LibraryController
 from desktop.controllers.discover_controller import DiscoverController
 from desktop.controllers.reader_controller import ReaderController
+
+from desktop.pages.reader_dock import ReaderDock
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -33,7 +37,6 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
 
         self.threadpool = QThreadPool.globalInstance()
-
         self.cover_signals = CoverSignals()
         self.discover_signals = DiscoverSignals()
         self.coverdl_signals = CoverDlSignals()
@@ -71,6 +74,11 @@ class MainWindow(QMainWindow):
         self.search.setPlaceholderText("Search titles...")
         self.search.setFixedWidth(280)
 
+        self.btn_genres = QToolButton(text="Genres")
+        self.btn_genres.setPopupMode(QToolButton.InstantPopup)
+        self.genre_menu = QMenu(self)
+        self.btn_genres.setMenu(self.genre_menu)
+
         header = QWidget()
         header.setFixedHeight(52)
         header_layout = QHBoxLayout(header)
@@ -83,6 +91,7 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(app_title)
         header_layout.addSpacing(8)
         header_layout.addWidget(mode_bar)
+        header_layout.addWidget(self.btn_genres)
         header_layout.addStretch(1)
         header_layout.addWidget(self.search)
 
@@ -154,47 +163,8 @@ class MainWindow(QMainWindow):
         self.reader_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.reader_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable)
 
-        dock_body = QWidget()
-        dock_layout = QVBoxLayout(dock_body)
-
-        fit_box = QGroupBox("Fit")
-        fit_layout = QVBoxLayout(fit_box)
-        self.fit_width_btn = QRadioButton("Width", checked=True)
-        self.fit_height_btn = QRadioButton("Height")
-        fit_layout.addWidget(self.fit_width_btn)
-        fit_layout.addWidget(self.fit_height_btn)
-
-        self.fit_group = QButtonGroup(self)
-        self.fit_group.addButton(self.fit_width_btn)
-        self.fit_group.addButton(self.fit_height_btn)
-
-        dir_box = QGroupBox("Direction")
-        dir_layout = QVBoxLayout(dir_box)
-        self.dir_ltr_btn = QRadioButton("Left -> Right", checked=True)
-        self.dir_rtl_btn = QRadioButton("Right -> Left")
-        dir_layout.addWidget(self.dir_ltr_btn)
-        dir_layout.addWidget(self.dir_rtl_btn)
-
-        self.dir_group = QButtonGroup(self)
-        self.dir_group.addButton(self.dir_ltr_btn)
-        self.dir_group.addButton(self.dir_rtl_btn)
-
-        self.page_slider = QSlider(Qt.Horizontal)
-        self.page_slider.setMinimum(1)
-        self.page_slider.setMaximum(1)
-        self.page_slider.setValue(1)
-
-        self.reader_info = QLabel("No chapter loaded")
-        self.reader_info.setWordWrap(True)
-
-        dock_layout.addWidget(fit_box)
-        dock_layout.addWidget(dir_box)
-        dock_layout.addWidget(QLabel("Page"))
-        dock_layout.addWidget(self.page_slider)
-        dock_layout.addWidget(self.reader_info)
-        dock_layout.addStretch(1)
-
-        self.reader_dock.setWidget(dock_body)
+        self.reader_dock_widget = ReaderDock()
+        self.reader_dock.setWidget(self.reader_dock_widget)
         self.addDockWidget(Qt.RightDockWidgetArea, self.reader_dock)
         self.reader_dock.setVisible(False)
 
@@ -227,8 +197,8 @@ class MainWindow(QMainWindow):
         self.reader_controller = ReaderController(
             scroll=self.scroll,
             image_label=self.image_label,
-            page_slider=self.page_slider,
-            reader_info=self.reader_info,
+            page_slider=self.reader_dock_widget.page_slider,
+            reader_info=self.reader_dock_widget.reader_info,
             set_title=self.setWindowTitle,
         )
 
@@ -239,6 +209,8 @@ class MainWindow(QMainWindow):
         self.btn_favorites.toggled.connect(lambda x: x and self.set_library_mode("favorites"))
         self.btn_continue.toggled.connect(lambda x: x and self.set_library_mode("continue"))
         self.btn_discover.toggled.connect(lambda x: x and self.set_library_mode("discover"))
+
+        self.genre_menu.aboutToShow.connect(lambda: self.discover_controller.populate_genre_menu(self.genre_menu))
 
         self.manga_list.currentItemChanged.connect(self.on_manga_selected)
         self.detail_page.chapters_preview.itemActivated.connect(self.detail_controller.on_chapter_preview_activated)
@@ -252,11 +224,9 @@ class MainWindow(QMainWindow):
 
         self.chapters_page.chapter_list.currentTextChanged.connect(self.on_chapter_selected)
 
-        self.fit_width_btn.toggled.connect(lambda x: x and self.reader_controller.set_fit("width"))
-        self.fit_height_btn.toggled.connect(lambda x: x and self.reader_controller.set_fit("height"))
-        self.dir_ltr_btn.toggled.connect(lambda x: x and self.reader_controller.set_direction("LTR"))
-        self.dir_rtl_btn.toggled.connect(lambda x: x and self.reader_controller.set_direction("RTL"))
-        self.page_slider.valueChanged.connect(lambda v: self.reader_controller.set_page(v - 1))
+        self.reader_dock_widget.fitChanged.connect(self.reader_controller.set_fit)
+        self.reader_dock_widget.directionChanged.connect(self.reader_controller.set_direction)
+        self.reader_dock_widget.pageChanged.connect(lambda v: self.reader_controller.set_page(v - 1))
 
     def import_library_folder(self):
         start = get_library_root() or str(MANGA_DIR)
@@ -343,8 +313,8 @@ class MainWindow(QMainWindow):
             return
 
         self.set_ui_mode("reading")
-        self.fit_width_btn.setChecked(True)
-        self.dir_ltr_btn.setChecked(True)
+        self.reader_dock_widget.set_fit("width")
+        self.reader_dock_widget.set_direction("LTR")
 
         mark_opened(title)
         self.library_controller.reload()
@@ -357,6 +327,8 @@ class MainWindow(QMainWindow):
             self.reader_controller.pages = []
             self.reader_controller.page_idx = 0
             self.image_label.setText("No chapters found")
+            self.reader_dock_widget.set_page_range(1)
+            self.reader_dock_widget.set_info("No chapter loaded")
             return
 
         if chapter and chapter in chapters:
