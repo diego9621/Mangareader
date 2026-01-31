@@ -54,9 +54,14 @@ class DetailPage(QWidget):
         self.btn_continue = QPushButton("Continue")
         self.btn_open = QPushButton("Open")
         self.btn_open_link = QPushButton("Open Link")
+        self.btn_add_library = QPushButton("Add to Library")
         self.btn_continue.setObjectName("PrimaryCTA")
         self.btn_open.setObjectName("SecondaryCTA")
         self.btn_open_link.setObjectName("SecondaryCTA")
+        self.btn_add_library.setObjectName("PrimaryCTA")
+
+
+        self.btn_add_library.setVisible(False)
 
         self.btn_continue.clicked.connect(self.continueClicked.emit)
         self.btn_open.clicked.connect(self.openClicked.emit)
@@ -68,6 +73,7 @@ class DetailPage(QWidget):
         btn_row_l.setSpacing(10)
         btn_row_l.addWidget(self.btn_continue, 1)
         btn_row_l.addWidget(self.btn_open, 1)
+        btn_row_l.addWidget(self.btn_add_library, 1)
         btn_row_l.addWidget(self.btn_open_link, 1)
 
         self.chapters_preview = QListWidget()

@@ -11,7 +11,7 @@ def sync_library():
     root = get_library_root()
     if not root:
         return []
-    
+
     root_path = Path(root)
     manga_names = list_dirs(root_path)
 
@@ -45,7 +45,3 @@ def mark_opened(title: str):
         m.last_opened = datetime.utcnow()
         m.open_count = (m.open_count or 0)
         session.commit() 
-        
-        
-        
-       

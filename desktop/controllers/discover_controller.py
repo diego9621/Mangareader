@@ -2,11 +2,13 @@ from __future__ import annotations
 import re
 from PySide6.QtCore import Qt, QSize, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QListWidgetItem, QMenu
+from PySide6.QtWidgets import QListWidgetItem, QMenu, QMessageBox
 from desktop.widgets.manga_card import MangaCard
 from desktop.workers.discover_worker import DiscoverWorker
+from desktop.workers.mangadex_discover_worker import MangadexDiscoverWorker, MangadexDiscoverSignals
 from desktop.workers.cover_dl_worker import CoverDlWorker
 from desktop.utils import pixmap_cover_crop
+from app.services.online_library_service import add_manga_to_library, is_in_library
 
 class DiscoverController:
     def __init__(self, threadpool, discover_list, coverdl_signals, discover_signals, detail_page, open_link_callback):
@@ -21,20 +23,37 @@ class DiscoverController:
         self.items_view: list[dict] = []
 
         self.selected_link: str | None = None
+        self.selected_manga: dict | None = None
 
         self.selected_genres: set[str] = set()
         self.render_id = 0
         self.cover_jobs: dict[str, QListWidgetItem] = {}
 
+
+        self.use_mangadex = True
+        self.mangadex_signals = MangadexDiscoverSignals()
+        self.mangadex_signals.done.connect(self.on_done)
+
         self.discover_signals.done.connect(self.on_done)
         self.coverdl_signals.done.connect(self.on_cover_done)
+
+
+        self.detail_page.btn_add_library.clicked.connect(self.add_to_library)
 
     def load(self, q: str):
         q = (q or "").strip()
         mode = "search" if q else "trending"
         self.discover_list.clear()
         self.discover_list.addItem(QListWidgetItem("Loading…"))
-        self.threadpool.start(DiscoverWorker(mode, q, self.discover_signals))
+
+
+        if self.use_mangadex:
+            worker = MangadexDiscoverWorker(mode, q, self.mangadex_signals, page=1, per_page=50)
+        else:
+
+            worker = DiscoverWorker(mode, q, self.discover_signals)
+
+        self.threadpool.start(worker)
 
     def on_done(self, items: list, err: str):
         if err:
@@ -179,6 +198,7 @@ class DiscoverController:
             return
 
         rid = self.render_id
+        self.selected_manga = m
         self.detail_page.detail_title.setText(self._discover_title(m))
         self.selected_link = m.get("siteUrl")
 
@@ -188,6 +208,19 @@ class DiscoverController:
         self.detail_page.detail_meta.setText("")
         self.detail_page.detail_desc.setText("")
         self.detail_page.set_genres([])
+
+
+        source = m.get("source", "")
+        source_id = m.get("mangadex_id") or m.get("id")
+        if source in ["mangadex", "anilist"] and source_id:
+            already_in_library = is_in_library(source, source_id)
+            self.detail_page.btn_add_library.setVisible(not already_in_library)
+            if already_in_library:
+                self.detail_page.btn_add_library.setText("In Library")
+            else:
+                self.detail_page.btn_add_library.setText("Add to Library")
+        else:
+            self.detail_page.btn_add_library.setVisible(False)
 
         url = (m.get("coverImage") or {}).get("large")
         if url:
@@ -276,3 +309,36 @@ class DiscoverController:
         if m:
             return f"{y:04d}-{m:02d}"
         return f"{y:04d}"
+
+    def add_to_library(self):
+
+        if not self.selected_manga:
+            return
+
+        try:
+            manga, was_created = add_manga_to_library(self.selected_manga)
+
+            if was_created:
+
+                title = self._discover_title(self.selected_manga)
+                QMessageBox.information(
+                    self.detail_page,
+                    "Added to Library",
+                    f"'{title}' has been added to your library!\n\n"
+                    f"You can now find it in the Library tab."
+                )
+
+
+                self.detail_page.btn_add_library.setVisible(False)
+            else:
+                QMessageBox.information(
+                    self.detail_page,
+                    "Already in Library",
+                    "This manga is already in your library."
+                )
+        except Exception as e:
+            QMessageBox.critical(
+                self.detail_page,
+                "Error",
+                f"Failed to add manga to library:\n{str(e)}"
+            )

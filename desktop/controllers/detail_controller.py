@@ -6,6 +6,11 @@ from PySide6.QtGui import QPixmap
 from app.core.reader import list_chapters, list_pages
 from app.services.cover_service import cover_path_for_manga_dir
 from app.services.progress_services import load_progress
+from app.services.chapter_service import sync_fetch_chapters, get_manga_chapters
+from app.services.library_service import get_library
+from sqlmodel import select
+from app.db.session import get_session
+from app.models import Manga
 
 
 class DetailController:
@@ -66,6 +71,53 @@ class DetailController:
             self.detail_page.detail_sub.setText("")
             return
 
+
+        if mdir is None:
+
+            with get_session() as session:
+                manga = session.exec(
+                    select(Manga).where(Manga.title == title)
+                ).first()
+
+                if manga and manga.source != "local":
+
+                    try:
+                        chapters = sync_fetch_chapters(manga.id)
+
+                        if not chapters:
+                            self.detail_page.detail_sub.setText("No chapters found")
+                            return
+
+                        self.detail_page.detail_sub.setText(f"{len(chapters)} chapters available")
+
+
+                        for chapter in chapters[:50]:  
+                            it = QListWidgetItem()
+                            it.setData(Qt.UserRole, ("online", manga.id, chapter.id, chapter.chapter_number))
+                            it.setSizeHint(QSize(0, 56))
+
+                            ch_title = chapter.title or f"Chapter {chapter.chapter_number}"
+                            group = f" [{chapter.scanlation_group}]" if chapter.scanlation_group else ""
+                            text = f"{ch_title}{group}  ({chapter.page_count} pages)"
+
+                            if self.make_row:
+                                w = self.make_row(ch_title, 1, chapter.page_count)
+                                self.detail_page.chapters_preview.addItem(it)
+                                self.detail_page.chapters_preview.setItemWidget(it, w)
+                            else:
+                                it.setText(text)
+                                self.detail_page.chapters_preview.addItem(it)
+
+                        if len(chapters) > 50:
+                            msg_item = QListWidgetItem(f"... and {len(chapters) - 50} more chapters")
+                            msg_item.setFlags(Qt.ItemFlag.NoItemFlags)
+                            self.detail_page.chapters_preview.addItem(msg_item)
+
+                    except Exception as e:
+                        self.detail_page.detail_sub.setText(f"Error loading chapters: {e}")
+                    return
+
+
         chapters = list_chapters(mdir)
         if not chapters:
             self.detail_page.detail_sub.setText("No chapters found")
@@ -101,6 +153,16 @@ class DetailController:
         ch = item.data(Qt.UserRole)
         if not ch:
             return
-        title = self.detail_page.detail_title.text()
-        if title:
-            self.open_manga(title, chapter=ch)
+
+
+        if isinstance(ch, tuple) and ch[0] == "online":
+            _, manga_id, chapter_id, chapter_number = ch
+
+            title = self.detail_page.detail_title.text()
+            if title:
+                self.open_manga(title, chapter=chapter_id, is_online=True)
+        else:
+
+            title = self.detail_page.detail_title.text()
+            if title:
+                self.open_manga(title, chapter=ch)

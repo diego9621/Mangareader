@@ -10,7 +10,7 @@ class CoverDlWorker(QRunnable):
         self.key = key
         self.url = url
         self.signals = signals
-    
+
     def run(self):
         try:
             p = ensure_cover(self.url)

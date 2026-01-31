@@ -12,11 +12,10 @@ class DiscoverWorker(QRunnable):
         self.signals = signals
         self.page = page
         self.per_page = per_page
-    
+
     def run(self):
         try:
             items = anilist_search(self.query, self.page, self.per_page) if self.mode == "search" else anilist_trending(self.page, self.per_page)
             self.signals.done.emit(items, "")
         except Exception as e:
             self.signals.done.emit([], str(e))
-            

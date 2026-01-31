@@ -58,24 +58,46 @@ class LibraryController:
         if self.query:
             rows = [m for m in rows if self.query in m.title.lower()]
 
-        self.manga_by_title = {m.title: Path(m.path) for m in rows}
+
+        self.manga_by_title = {}
+        for m in rows:
+            if m.path:  
+                self.manga_by_title[m.title] = Path(m.path)
+            else:  
+                self.manga_by_title[m.title] = None
 
         self.manga_list.blockSignals(True)
         self.manga_list.clear()
 
         for m in rows:
             title = m.title
-            manga_dir = Path(m.path)
             label = f"* {title}" if getattr(m, "is_favorite", False) else title
+
+
+            source = getattr(m, "source", "local")
+            if source != "local":
+                label = f"🌐 {label}"  
+
             it = QListWidgetItem(label)
             it.setData(Qt.UserRole, title)
-            cover = cover_path_for_manga_dir(manga_dir)
-            if cover.exists():
-                it.setIcon(QIcon(str(cover)))
-            else:
-                ch = list_chapters(manga_dir)
-                if ch:
-                    self.threadpool.start(CoverWorker(title, manga_dir, ch[0], self.cover_signals))
+
+
+            if m.path:  
+                manga_dir = Path(m.path)
+                cover = cover_path_for_manga_dir(manga_dir)
+                if cover.exists():
+                    it.setIcon(QIcon(str(cover)))
+                else:
+                    ch = list_chapters(manga_dir)
+                    if ch:
+                        self.threadpool.start(CoverWorker(title, manga_dir, ch[0], self.cover_signals))
+            else:  
+                cover_url = getattr(m, "cover_url", None)
+                if cover_url:
+
+
+                    pass
+
             self.manga_list.addItem(it)
 
         self.manga_list.blockSignals(False)
@@ -86,4 +108,4 @@ class LibraryController:
             if it:
                 self.set_selected_title(it.data(Qt.UserRole) or "")
         else:
-            self.clear_detail("No results")
+            self.clear_detail()

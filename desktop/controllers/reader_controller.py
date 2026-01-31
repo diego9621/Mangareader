@@ -4,9 +4,14 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PIL import Image
 from PIL.ImageQt import ImageQt
+import asyncio
 
 from app.core.reader import list_pages
 from app.services.progress_services import load_progress, save_progress
+from app.services.chapter_service import sync_fetch_pages, get_chapter_pages
+from app.services.page_loader import get_page_loader
+from app.db.session import get_session
+from app.models import Chapter, Page as PageModel
 
 
 class ReaderController:
@@ -25,10 +30,20 @@ class ReaderController:
         self.fit_mode = "width"
         self.direction = "LTR"
 
+
+        self.is_online = False
+        self.current_chapter: Chapter | None = None
+        self.online_pages: list[PageModel] = []
+        self.page_loader = get_page_loader()
+
     def load_chapter(self, manga_dir: Path, chapter_dir: Path):
+
+        self.is_online = False
         self.current_manga_dir = manga_dir
         self.current_chapter_dir = chapter_dir
         self.pages = list_pages(chapter_dir)
+        self.online_pages = []
+        self.current_chapter = None
 
         if not self.pages:
             self.page_idx = 0
@@ -43,6 +58,51 @@ class ReaderController:
         self._sync_slider()
         self.show_page()
 
+    def load_online_chapter(self, chapter_id: int):
+
+        self.is_online = True
+        self.current_manga_dir = None
+        self.current_chapter_dir = None
+        self.pages = []
+
+
+        with get_session() as session:
+            chapter = session.get(Chapter, chapter_id)
+            if not chapter:
+                self.image_label.setText("Chapter not found")
+                return
+
+
+            self.current_chapter = Chapter(
+                id=chapter.id,
+                manga_id=chapter.manga_id,
+                chapter_number=chapter.chapter_number,
+                title=chapter.title,
+                source=chapter.source,
+                source_chapter_id=chapter.source_chapter_id,
+                page_count=chapter.page_count
+            )
+
+
+        try:
+            self.online_pages = sync_fetch_pages(chapter_id)
+
+            if not self.online_pages:
+                self.image_label.setText("No pages found in chapter")
+                self._sync_slider()
+                self._update_info()
+                return
+
+
+            self.page_idx = 0
+            self._sync_slider()
+            self.show_page()
+
+        except Exception as e:
+            self.image_label.setText(f"Error loading chapter: {e}")
+            self._sync_slider()
+            self._update_info()
+
     def set_fit(self, fit_mode: str):
         self.fit_mode = fit_mode
         self.apply_pixmap()
@@ -52,25 +112,39 @@ class ReaderController:
         self.direction = direction
 
     def set_page(self, idx: int):
-        if not self.pages:
-            return
-        idx = min(max(idx, 0), len(self.pages) - 1)
+        if self.is_online:
+            if not self.online_pages:
+                return
+            idx = min(max(idx, 0), len(self.online_pages) - 1)
+        else:
+            if not self.pages:
+                return
+            idx = min(max(idx, 0), len(self.pages) - 1)
+
         if idx == self.page_idx:
             return
         self.page_idx = idx
         self.show_page()
 
     def next_page(self):
-        if self.pages and self.page_idx < len(self.pages) - 1:
+        max_idx = len(self.online_pages) - 1 if self.is_online else len(self.pages) - 1
+        if self.page_idx < max_idx:
             self.page_idx += 1
             self.show_page()
 
     def prev_page(self):
-        if self.pages and self.page_idx > 0:
+        if self.page_idx > 0:
             self.page_idx -= 1
             self.show_page()
 
     def show_page(self):
+        if self.is_online:
+            self._show_online_page()
+        else:
+            self._show_local_page()
+
+    def _show_local_page(self):
+
         if not self.pages:
             return
         p = self.pages[self.page_idx]
@@ -78,6 +152,37 @@ class ReaderController:
         self.original_pixmap = QPixmap.fromImage(ImageQt(img))
         self.apply_pixmap()
         self._sync_slider(set_value=True)
+        self._update_info()
+        self._save_progress()
+
+    def _show_online_page(self):
+
+        if not self.online_pages or not self.current_chapter:
+            return
+
+        page = self.online_pages[self.page_idx]
+
+
+        self.image_label.setText("Loading page...")
+
+        try:
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                pixmap = loop.run_until_complete(
+                    self.page_loader.load_page_pixmap(self.current_chapter, page)
+                )
+                self.original_pixmap = pixmap
+                self.apply_pixmap()
+                self._sync_slider(set_value=True)
+                self._update_info()
+
+            finally:
+                loop.close()
+
+        except Exception as e:
+            self.image_label.setText(f"Error loading page: {e}")
         self._update_info()
         if self.current_chapter_dir:
             save_progress(str(self.current_chapter_dir), self.page_idx)

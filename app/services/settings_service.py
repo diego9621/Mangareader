@@ -15,4 +15,3 @@ def set_library_root(path: str):
         else:
             session.add(Settings(id=1, library_root=path))
         session.commit()
-        

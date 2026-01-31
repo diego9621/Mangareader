@@ -25,47 +25,44 @@ coverImage { large }
 tags { name isAdult }
 """
 
-def _post(query: str, variables: dict) -> dict:
-    r = requests.post(API, json={"query": query, "variables": variables}, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    if "errors" in data and data["errors"]:
-        raise RuntimeError(data["errors"][0].get("message") or "AniList error")
-    return data["data"]
+def _post(query, variables=None):
+    resp = requests.post(API, json={"query": query, "variables": variables or {}}, timeout=10)
+    resp.raise_for_status()
+    return resp.json().get("data", {})
 
-def trending(page: int = 1, per_page: int = 24) -> list[dict]:
+def trending(page=1, per_page=50):
     q = f"""
-    query ($page:Int,$perPage:Int) {{
-      Page(page:$page, perPage:$perPage) {{
+    query ($page:Int,$perPage:Int) {{ 
+      Page(page:$page, perPage:$perPage) {{ 
         media(
           type:MANGA,
           sort:TRENDING_DESC,
           isAdult:false,
           genre_not_in:["Hentai"]
-        ) {{
+        ) {{ 
           {MEDIA_FIELDS}
-        }}
-      }}
-    }}
+        }} 
+      }} 
+    }} 
     """
     data = _post(q, {"page": page, "perPage": per_page})
     return (data.get("Page") or {}).get("media") or []
 
-def search(query: str, page: int = 1, per_page: int = 24) -> list[dict]:
+def search(query, page=1, per_page=50):
     q = f"""
-    query ($search:String,$page:Int,$perPage:Int) {{
-      Page(page:$page, perPage:$perPage) {{
+    query ($search:String,$page:Int,$perPage:Int) {{ 
+      Page(page:$page, perPage:$perPage) {{ 
         media(
           type:MANGA,
           search:$search,
           sort:SEARCH_MATCH,
           isAdult:false,
           genre_not_in:["Hentai"]
-        ) {{
+        ) {{ 
           {MEDIA_FIELDS}
-        }}
-      }}
-    }}
+        }} 
+      }} 
+    }} 
     """
     data = _post(q, {"search": query, "page": page, "perPage": per_page})
     return (data.get("Page") or {}).get("media") or []

@@ -20,15 +20,15 @@ def build_cover(manga_dir: Path, first_chapter_name: str) -> Path | None:
     out = cover_path_for_manga_dir(manga_dir)
     if out.exists():
         return None
-    
+
     chapter_dir = manga_dir / first_chapter_name
     if not chapter_dir.exists():
         return None
-    
+
     img_path = find_first_image_in_tree(chapter_dir)
     if not img_path:
         return None
-    
+
     img = Image.open(img_path).convert("RGB")
     img.thumbnail((600, 900))
     img.save(out, "JPEG", quality=85, optimize=True)

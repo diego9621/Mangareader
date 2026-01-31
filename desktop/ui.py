@@ -284,8 +284,33 @@ class MainWindow(QMainWindow):
         if not it:
             return
         title = it.data(Qt.UserRole) or ""
-        if title:
-            self.open_manga(title)
+        if not title:
+            return
+
+        mdir = self.library_controller.manga_by_title.get(title)
+
+
+        if mdir is None:
+            from app.db.session import get_session
+            from app.models import Manga, Chapter
+            from sqlmodel import select
+
+            with get_session() as session:
+                manga = session.exec(select(Manga).where(Manga.title == title)).first()
+                if manga and manga.source != "local":
+
+                    chapter = session.exec(
+                        select(Chapter)
+                        .where(Chapter.manga_id == manga.id)
+                        .order_by(Chapter.chapter_number)
+                    ).first()
+
+                    if chapter:
+                        self.open_manga(title, chapter=chapter.id, is_online=True)
+                    return
+
+
+        self.open_manga(title)
 
     def continue_selected_manga(self):
         if self.left_stack.currentIndex() == 1:
@@ -298,6 +323,39 @@ class MainWindow(QMainWindow):
         if not title:
             return
         mdir = self.library_controller.manga_by_title.get(title)
+
+
+        if mdir is None:
+            from app.db.session import get_session
+            from app.models import Manga, Chapter, Progress
+            from sqlmodel import select
+
+            with get_session() as session:
+                manga = session.exec(select(Manga).where(Manga.title == title)).first()
+                if manga and manga.source != "local":
+
+                    progress = session.exec(
+                        select(Progress)
+                        .where(Progress.manga_id == manga.id)
+                        .order_by(Progress.last_read.desc())
+                    ).first()
+
+                    if progress and progress.chapter_id:
+
+                        self.open_manga(title, chapter=progress.chapter_id, is_online=True)
+                    else:
+
+                        chapter = session.exec(
+                            select(Chapter)
+                            .where(Chapter.manga_id == manga.id)
+                            .order_by(Chapter.chapter_number)
+                        ).first()
+
+                        if chapter:
+                            self.open_manga(title, chapter=chapter.id, is_online=True)
+                    return
+
+
         if not mdir:
             return
         target = self.detail_controller.compute_continue_target(mdir)
@@ -307,8 +365,28 @@ class MainWindow(QMainWindow):
         ch, _, _ = target
         self.open_manga(title, chapter=ch)
 
-    def open_manga(self, title: str, chapter: str | None = None):
+    def open_manga(self, title: str, chapter: str | None = None, is_online: bool = False):
         manga_dir = self.library_controller.manga_by_title.get(title)
+
+
+        if is_online and isinstance(chapter, int):
+
+            self.set_ui_mode("reading")
+            self.reader_dock_widget.set_fit("width")
+            self.reader_dock_widget.set_direction("LTR")
+
+
+
+
+
+
+            self.reader_controller.load_online_chapter(chapter)
+
+
+            self.chapters_page.chapter_list.clear()
+            return
+
+
         if not manga_dir:
             return
 
